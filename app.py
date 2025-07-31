@@ -6,8 +6,8 @@ import plotly.graph_objects as go
 from datetime import datetime
 import time
 
-# Configuration
 st.set_page_config(layout="wide", page_title="Prévision IA Ventes & Stock")
+
 st.markdown("""
     <style>
     body { background-color: #111; color: #fcd000; }
@@ -24,22 +24,13 @@ def load_data():
     xls = pd.ExcelFile("Rocamora Files_SampleData_26062025.xlsx")
     return xls.parse("Daily Sales 2024"), xls.parse("Daily Sales 26062025"), xls.parse("Daily Stock 26062025")
 
-with st.spinner("📥 Chargement des données en cours..."):
-    time.sleep(1)
-    sales_2024, sales_2025, stock_df = load_data()
-st.success("✅ Données chargées avec succès !")
-
-with st.spinner("🧠 Prétraitement et entraînement du modèle en cours..."):
-    time.sleep(1.2)
+@st.cache_data
+def prepare_data(sales_2024, sales_2025, stock_df):
     for df in [sales_2024, sales_2025]:
         df["Billing Date"] = pd.to_datetime(df["Billing Date"], errors="coerce")
-
     sales = pd.concat([sales_2024, sales_2025], ignore_index=True)
     sales.dropna(subset=["Billing Date", "Quantity", "Item Code"], inplace=True)
-
-    # Filtrer uniquement les années pertinentes (2024 à 2026)
     sales = sales[(sales["Billing Date"].dt.year >= 2024) & (sales["Billing Date"].dt.year <= 2026)]
-
     sales["Month"] = sales["Billing Date"].dt.to_period("M")
     sales["Date"] = sales["Month"].dt.to_timestamp()
     sales["Month_Num"] = sales["Date"].dt.month
@@ -47,26 +38,24 @@ with st.spinner("🧠 Prétraitement et entraînement du modèle en cours..."):
     sales["Month_Index"] = (sales["Year"] - sales["Year"].min()) * 12 + sales["Month_Num"]
     sales["Month_sin"] = np.sin(2 * np.pi * sales["Month_Num"] / 12)
     sales["Month_cos"] = np.cos(2 * np.pi * sales["Month_Num"] / 12)
+    monthly_sales = sales.groupby(["Item Code", "Item Description", "Date", "Month_Index", "Month_Num", "Year", "Month_sin", "Month_cos"]).agg(Quantity=("Quantity", "sum")).reset_index()
+    stock_df["QTY"] = pd.to_numeric(stock_df["QTY"], errors="coerce")
+    stock_summary = stock_df.groupby(["ITEM_CODE", "Item Description"]).agg(Stock_QTY=("QTY", "sum")).reset_index()
+    return sales, monthly_sales, stock_summary
 
-    monthly_sales = sales.groupby(["Item Code", "Item Description", "Date", "Month_Index", "Month_Num", "Year", "Month_sin", "Month_cos"]).agg(
-        Quantity=("Quantity", "sum")
-    ).reset_index()
-
+@st.cache_data
+def generate_forecasts(monthly_sales):
     top_items = monthly_sales.groupby("Item Code")["Quantity"].sum().sort_values(ascending=False).head(10).index.tolist()
-
     forecast_all = []
     for item in top_items:
         df = monthly_sales[monthly_sales["Item Code"] == item].copy().sort_values("Date")
         df["RollingMean_3"] = df["Quantity"].rolling(window=3, min_periods=1).mean()
         features = ["Month_Index", "Month_Num", "Year", "Month_sin", "Month_cos", "RollingMean_3"]
         df = df.dropna(subset=features)
-
         model = xgb.XGBRegressor(n_estimators=30, max_depth=3, random_state=42, n_jobs=-1)
         model.fit(df[features], df["Quantity"])
-
         last_date, last_index = df["Date"].max(), df["Month_Index"].max()
         rolling_window = df["Quantity"].values[-3:].tolist()
-
         for i in range(1, 13):
             future_date = last_date + pd.DateOffset(months=i)
             m, y = future_date.month, future_date.year
@@ -86,43 +75,43 @@ with st.spinner("🧠 Prétraitement et entraînement du modèle en cours..."):
                 "IC_95_lower": max(0, pred * 0.85),
                 "IC_95_upper": pred * 1.15
             })
+    forecast_df = pd.DataFrame(forecast_all)
+    return forecast_df, top_items
 
-forecast_df = pd.DataFrame(forecast_all)
-stock_df["QTY"] = pd.to_numeric(stock_df["QTY"], errors="coerce")
-stock_summary = stock_df.groupby(["ITEM_CODE", "Item Description"]).agg(Stock_QTY=("QTY", "sum")).reset_index()
-st.success("✅ Modèle entraîné et prévisions générées pour le TOP 10 produits.")
-
-st.markdown("### 🔍 Visualisation des prévisions")
-st.markdown("Ce graphique combine l'historique (en jaune), les prévisions IA (en vert), et deux intervalles de confiance (80% et 95%) comme dans une analyse de série temporelle avancée.")
+sales_2024, sales_2025, stock_df = load_data()
+sales, monthly_sales, stock_summary = prepare_data(sales_2024, sales_2025, stock_df)
+forecast_df, top_items = generate_forecasts(monthly_sales)
 
 selected_item = st.selectbox("📦 Sélectionner un produit du TOP 10 :", top_items)
-
-item_data = forecast_df[forecast_df["Item Code"] == selected_item].copy()
-past_data = monthly_sales[monthly_sales["Item Code"] == selected_item][["Date", "Quantity"]].copy()
-stock_july = stock_summary[stock_summary["ITEM_CODE"] == selected_item]["Stock_QTY"].values[0]
+hist_data = monthly_sales[monthly_sales["Item Code"] == selected_item].copy()
+forecast_data = forecast_df[forecast_df["Item Code"] == selected_item].copy()
 
 fig = go.Figure()
-fig.add_trace(go.Scatter(x=past_data["Date"], y=past_data["Quantity"], mode="lines+markers", name="Historique", line=dict(color="gold")))
-fig.add_trace(go.Scatter(x=item_data["Date"], y=item_data["Predicted Quantity"], mode="lines+markers", name="Prévision IA", line=dict(color="lime")))
-fig.add_trace(go.Scatter(x=item_data["Date"], y=item_data["IC_80_upper"], name="IC 80%", line=dict(width=0), showlegend=False))
-fig.add_trace(go.Scatter(x=item_data["Date"], y=item_data["IC_80_lower"], fill='tonexty', fillcolor='rgba(0,255,0,0.1)', line=dict(width=0), showlegend=False))
-fig.add_trace(go.Scatter(x=item_data["Date"], y=item_data["IC_95_upper"], name="IC 95%", line=dict(width=0), showlegend=False))
-fig.add_trace(go.Scatter(x=item_data["Date"], y=item_data["IC_95_lower"], fill='tonexty', fillcolor='rgba(0,255,0,0.05)', line=dict(width=0), showlegend=False))
-fig.update_layout(title=f"Prévision de ventes – {selected_item}", xaxis_title="Mois", yaxis_title="Quantité", template="plotly_dark")
+fig.add_trace(go.Scatter(x=hist_data["Date"], y=hist_data["Quantity"], mode='lines+markers', name='Historique', line=dict(color='gold')))
+fig.add_trace(go.Scatter(x=forecast_data["Date"], y=forecast_data["Predicted Quantity"], mode='lines+markers', name='Prévision IA', line=dict(color='lime')))
+fig.add_trace(go.Scatter(x=forecast_data["Date"], y=forecast_data["IC_95_upper"], name="IC 95%+", line=dict(width=0), showlegend=False))
+fig.add_trace(go.Scatter(x=forecast_data["Date"], y=forecast_data["IC_95_lower"], name="IC 95%-", fill='tonexty', fillcolor='rgba(0,255,0,0.1)', line=dict(width=0), showlegend=False))
+fig.add_trace(go.Scatter(x=forecast_data["Date"], y=forecast_data["IC_80_upper"], name="IC 80%+", line=dict(width=0), showlegend=False))
+fig.add_trace(go.Scatter(x=forecast_data["Date"], y=forecast_data["IC_80_lower"], name="IC 80%-", fill='tonexty', fillcolor='rgba(0,255,0,0.2)', line=dict(width=0), showlegend=False))
+fig.update_layout(title=f"Prévision de ventes – {selected_item}", xaxis_title='Mois', yaxis_title='Quantité', template="plotly_dark")
+
 st.plotly_chart(fig, use_container_width=True)
 
-# Tableau juillet
-july_row = item_data.iloc[0]
-status = "✅ OK" if stock_july >= july_row["Predicted Quantity"] else "❌ Risque BO"
-table = pd.DataFrame({
-    "Mois": [july_row["Date"].strftime("%B %Y")],
-    "Prévision": [round(july_row["Predicted Quantity"], 1)],
-    "Stock disponible": [stock_july],
-    "Statut": [status]
-})
-st.markdown("#### 📋 Détail du mois de juillet")
-st.dataframe(table.style.applymap(lambda val: 'background-color: #d4edda; color: #155724' if val == '✅ OK' else 'background-color: #f8d7da; color: #721c24', subset=["Statut"]))
+st.subheader("📋 Détail du mois de juillet")
+july_stock = stock_summary[stock_summary["ITEM_CODE"] == selected_item]["Stock_QTY"].values
+july_stock = july_stock[0] if len(july_stock) > 0 else 0
+forecast_item = forecast_data.copy()
+forecast_item["Cumul prévisions"] = forecast_item["Predicted Quantity"].cumsum()
+mois_rup = forecast_item[forecast_item["Cumul prévisions"] > july_stock]
+rupture_text = "✅ Stock suffisant sur les 12 mois." if mois_rup.empty else f"⚠️ Réapprovisionnement nécessaire avant {mois_rup.iloc[0]['Date'].strftime('%B %Y')}"
 
-# Résumé IA
-st.markdown("### 🤖 Résumé IA")
-st.markdown(f"Le produit **{july_row['Item Description']}** est prévu à **{july_row['Predicted Quantity']:.1f} unités** en **{july_row['Date'].strftime('%B %Y')}**. Le stock est de **{stock_july}**. {'🟢 Pas de rupture prévue.' if status == '✅ OK' else '🔴 Attention, risque de rupture immédiate.'}")
+col1, col2 = st.columns([2, 1])
+with col1:
+    st.dataframe(forecast_item[["Date", "Predicted Quantity", "Cumul prévisions"]].rename(columns={
+        "Date": "Mois",
+        "Predicted Quantity": "Prévision",
+        "Cumul prévisions": "Prévision cumulée"
+    }))
+with col2:
+    st.metric("📦 Stock disponible (juillet)", int(july_stock))
+    st.markdown(rupture_text)
