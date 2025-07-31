@@ -69,9 +69,9 @@ def generate_forecasts(monthly_sales):
                 "Item Code": item,
                 "Item Description": df["Item Description"].iloc[0],
                 "Date": future_date,
-                "Predicted Quantity": pred,
-                "IC_lower": max(0, pred * 0.85),
-                "IC_upper": pred * 1.15
+                "Predicted Quantity": np.round(pred),
+                "IC_lower": max(0, np.round(pred * 0.85)),
+                "IC_upper": np.round(pred * 1.15)
             })
     forecast_df = pd.DataFrame(forecast_all)
     return forecast_df, top_items
