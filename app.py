@@ -20,19 +20,27 @@ st.markdown("""
 
 @st.cache_data
 def load_data():
-    sales_2024 = pd.read_excel("Rocamora Files_SampleData_26062025.xlsx", sheet_name="Sales 2024")
-    sales_2025 = pd.read_excel("Rocamora Files_SampleData_26062025.xlsx", sheet_name="Sales 26062025")
-    stock = pd.read_excel("Rocamora Files_SampleData_26062025.xlsx", sheet_name="Daily Stock 26062025")
-    return sales_2024, sales_2025, stock
+    xls = pd.ExcelFile("Rocamora Files_SampleData_26062025.xlsx")
+    return xls.parse("Daily Sales 2024"), xls.parse("Daily Sales 26062025"), xls.parse("Daily Stock 26062025")
 
 @st.cache_data
-def prepare_data():
-    sales_2024, sales_2025, stock = load_data()
-    sales_df = pd.concat([sales_2024, sales_2025])
-    sales_df['Month'] = pd.to_datetime(sales_df['Date']).dt.to_period('M').dt.to_timestamp()
-    grouped = sales_df.groupby(['Month', 'Item_Code'])['Quantity'].sum().reset_index()
-    return grouped, stock
-
+def prepare_data(sales_2024, sales_2025, stock_df):
+    for df in [sales_2024, sales_2025]:
+        df["Billing Date"] = pd.to_datetime(df["Billing Date"], errors="coerce")
+    sales = pd.concat([sales_2024, sales_2025], ignore_index=True)
+    sales.dropna(subset=["Billing Date", "Quantity", "Item Code"], inplace=True)
+    sales = sales[(sales["Billing Date"].dt.year >= 2024) & (sales["Billing Date"].dt.year <= 2026)]
+    sales["Month"] = sales["Billing Date"].dt.to_period("M")
+    sales["Date"] = sales["Month"].dt.to_timestamp()
+    sales["Month_Num"] = sales["Date"].dt.month
+    sales["Year"] = sales["Date"].dt.year
+    sales["Month_Index"] = (sales["Year"] - sales["Year"].min()) * 12 + sales["Month_Num"]
+    sales["Month_sin"] = np.sin(2 * np.pi * sales["Month_Num"] / 12)
+    sales["Month_cos"] = np.cos(2 * np.pi * sales["Month_Num"] / 12)
+    monthly_sales = sales.groupby(["Item Code", "Item Description", "Date", "Month_Index", "Month_Num", "Year", "Month_sin", "Month_cos"]).agg(Quantity=("Quantity", "sum")).reset_index()
+    stock_df["QTY"] = pd.to_numeric(stock_df["QTY"], errors="coerce")
+    stock_summary = stock_df.groupby(["ITEM_CODE", "Item Description"]).agg(Stock_QTY=("QTY", "sum")).reset_index()
+    return sales, monthly_sales, stock_summary
 @st.cache_data
 def generate_forecasts(grouped):
     all_predictions = {}
