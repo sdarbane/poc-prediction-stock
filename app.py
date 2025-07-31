@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 from datetime import datetime
 import time
 
-# Configuration de page
+# Configuration
 st.set_page_config(layout="wide", page_title="Prévision IA Ventes & Stock")
 st.markdown("""
     <style>
@@ -14,7 +14,6 @@ st.markdown("""
     .stApp { background-color: #111; }
     .big-font {font-size: 22px !important; font-weight: bold; color: #fcd000;}
     .centered {text-align: center;}
-    .plotly-graph {background-color: #222; border-radius: 8px; padding: 10px;}
     </style>
 """, unsafe_allow_html=True)
 
@@ -32,12 +31,15 @@ st.success("✅ Données chargées avec succès !")
 
 with st.spinner("🧠 Prétraitement et entraînement du modèle en cours..."):
     time.sleep(1.2)
-
     for df in [sales_2024, sales_2025]:
         df["Billing Date"] = pd.to_datetime(df["Billing Date"], errors="coerce")
 
     sales = pd.concat([sales_2024, sales_2025], ignore_index=True)
     sales.dropna(subset=["Billing Date", "Quantity", "Item Code"], inplace=True)
+
+    # Filtrer uniquement les années pertinentes (2024 à 2026)
+    sales = sales[(sales["Billing Date"].dt.year >= 2024) & (sales["Billing Date"].dt.year <= 2026)]
+
     sales["Month"] = sales["Billing Date"].dt.to_period("M")
     sales["Date"] = sales["Month"].dt.to_timestamp()
     sales["Month_Num"] = sales["Date"].dt.month
@@ -79,10 +81,10 @@ with st.spinner("🧠 Prétraitement et entraînement du modèle en cours..."):
                 "Item Description": df["Item Description"].iloc[0],
                 "Date": future_date,
                 "Predicted Quantity": pred,
-                "IC_5_lower": max(0, pred * 0.95),
-                "IC_5_upper": pred * 1.05,
-                "IC_10_lower": max(0, pred * 0.90),
-                "IC_10_upper": pred * 1.10
+                "IC_80_lower": max(0, pred * 0.90),
+                "IC_80_upper": pred * 1.10,
+                "IC_95_lower": max(0, pred * 0.85),
+                "IC_95_upper": pred * 1.15
             })
 
 forecast_df = pd.DataFrame(forecast_all)
@@ -90,33 +92,26 @@ stock_df["QTY"] = pd.to_numeric(stock_df["QTY"], errors="coerce")
 stock_summary = stock_df.groupby(["ITEM_CODE", "Item Description"]).agg(Stock_QTY=("QTY", "sum")).reset_index()
 st.success("✅ Modèle entraîné et prévisions générées pour le TOP 10 produits.")
 
-# Interface utilisateur
-st.markdown("### 🔎 Visualisation des prévisions")
-ic_range = st.radio("Choisir un intervalle de confiance :", ["±5%", "±10%"])
-selected_index = st.slider("🔟 Choisissez un produit parmi le TOP 10 :", 0, len(top_items)-1, 0)
-selected_item = top_items[selected_index]
+st.markdown("### 🔍 Visualisation des prévisions")
+st.markdown("Ce graphique combine l'historique (en jaune), les prévisions IA (en vert), et deux intervalles de confiance (80% et 95%) comme dans une analyse de série temporelle avancée.")
+
+selected_item = st.selectbox("📦 Sélectionner un produit du TOP 10 :", top_items)
 
 item_data = forecast_df[forecast_df["Item Code"] == selected_item].copy()
 past_data = monthly_sales[monthly_sales["Item Code"] == selected_item][["Date", "Quantity"]].copy()
 stock_july = stock_summary[stock_summary["ITEM_CODE"] == selected_item]["Stock_QTY"].values[0]
 
-# Graphique interactif
 fig = go.Figure()
-fig.add_trace(go.Scatter(x=past_data["Date"], y=past_data["Quantity"], mode="lines+markers", name="Historique", line=dict(color="#fcd000")))
-fig.add_trace(go.Scatter(x=item_data["Date"], y=item_data["Predicted Quantity"], mode="lines+markers", name="Prévision IA", line=dict(color="#00cc96")))
-
-if ic_range == "±5%":
-    fig.add_trace(go.Scatter(x=item_data["Date"], y=item_data["IC_5_upper"], name="IC +5%", line=dict(width=0), showlegend=False))
-    fig.add_trace(go.Scatter(x=item_data["Date"], y=item_data["IC_5_lower"], name="IC -5%", fill='tonexty', line=dict(width=0), fillcolor='rgba(0,204,150,0.2)', showlegend=False))
-else:
-    fig.add_trace(go.Scatter(x=item_data["Date"], y=item_data["IC_10_upper"], name="IC +10%", line=dict(width=0), showlegend=False))
-    fig.add_trace(go.Scatter(x=item_data["Date"], y=item_data["IC_10_lower"], name="IC -10%", fill='tonexty', line=dict(width=0), fillcolor='rgba(0,204,150,0.2)', showlegend=False))
-
-fig.update_layout(title=f"📦 {selected_item} – Prévision des ventes avec intervalle de confiance",
-                  xaxis_title="Mois", yaxis_title="Quantité", template="plotly_dark")
+fig.add_trace(go.Scatter(x=past_data["Date"], y=past_data["Quantity"], mode="lines+markers", name="Historique", line=dict(color="gold")))
+fig.add_trace(go.Scatter(x=item_data["Date"], y=item_data["Predicted Quantity"], mode="lines+markers", name="Prévision IA", line=dict(color="lime")))
+fig.add_trace(go.Scatter(x=item_data["Date"], y=item_data["IC_80_upper"], name="IC 80%", line=dict(width=0), showlegend=False))
+fig.add_trace(go.Scatter(x=item_data["Date"], y=item_data["IC_80_lower"], fill='tonexty', fillcolor='rgba(0,255,0,0.1)', line=dict(width=0), showlegend=False))
+fig.add_trace(go.Scatter(x=item_data["Date"], y=item_data["IC_95_upper"], name="IC 95%", line=dict(width=0), showlegend=False))
+fig.add_trace(go.Scatter(x=item_data["Date"], y=item_data["IC_95_lower"], fill='tonexty', fillcolor='rgba(0,255,0,0.05)', line=dict(width=0), showlegend=False))
+fig.update_layout(title=f"Prévision de ventes – {selected_item}", xaxis_title="Mois", yaxis_title="Quantité", template="plotly_dark")
 st.plotly_chart(fig, use_container_width=True)
 
-# Tableau de juillet
+# Tableau juillet
 july_row = item_data.iloc[0]
 status = "✅ OK" if stock_july >= july_row["Predicted Quantity"] else "❌ Risque BO"
 table = pd.DataFrame({
@@ -125,10 +120,9 @@ table = pd.DataFrame({
     "Stock disponible": [stock_july],
     "Statut": [status]
 })
-
-st.markdown("#### 📋 Détail premier mois (stock vs prévision)")
+st.markdown("#### 📋 Détail du mois de juillet")
 st.dataframe(table.style.applymap(lambda val: 'background-color: #d4edda; color: #155724' if val == '✅ OK' else 'background-color: #f8d7da; color: #721c24', subset=["Statut"]))
 
-# Résumé final
-st.markdown("### 🤖 Synthèse IA")
+# Résumé IA
+st.markdown("### 🤖 Résumé IA")
 st.markdown(f"Le produit **{july_row['Item Description']}** est prévu à **{july_row['Predicted Quantity']:.1f} unités** en **{july_row['Date'].strftime('%B %Y')}**. Le stock est de **{stock_july}**. {'🟢 Pas de rupture prévue.' if status == '✅ OK' else '🔴 Attention, risque de rupture immédiate.'}")
