@@ -19,17 +19,29 @@ st.markdown("""
 
 st.title("⚡ Prévision IA des Ventes & Gestion de Stock")
 
+DATA_FILE = "Rocamora Files_SampleData_26062025 (1).xlsx"
+
+
+def normalize_cai(series: pd.Series) -> pd.Series:
+    if series is None:
+        return pd.Series(dtype=object)
+    numeric_series = pd.to_numeric(series, errors="coerce")
+    return numeric_series.apply(lambda x: f"{int(x)}" if pd.notna(x) else np.nan)
+
+
 @st.cache_data
 def load_data():
-    xls = pd.ExcelFile("Rocamora Files_SampleData_26062025.xlsx")
+    xls = pd.ExcelFile(DATA_FILE)
     return xls.parse("Daily Sales 2024"), xls.parse("Daily Sales 26062025"), xls.parse("Daily Stock 26062025")
 
 @st.cache_data
 def prepare_data(sales_2024, sales_2025, stock_df):
     for df in [sales_2024, sales_2025]:
         df["Billing Date"] = pd.to_datetime(df["Billing Date"], errors="coerce")
+        df["Quantity"] = pd.to_numeric(df["Quantity"], errors="coerce")
+        df["CAI"] = normalize_cai(df["CAI"])
     sales = pd.concat([sales_2024, sales_2025], ignore_index=True)
-    sales.dropna(subset=["Billing Date", "Quantity", "Item Code"], inplace=True)
+    sales.dropna(subset=["Billing Date", "Quantity", "CAI"], inplace=True)
     sales = sales[(sales["Billing Date"].dt.year >= 2024) & (sales["Billing Date"].dt.year <= 2026)]
     sales["Month"] = sales["Billing Date"].dt.to_period("M")
     sales["Date"] = sales["Month"].dt.to_timestamp()
@@ -38,20 +50,26 @@ def prepare_data(sales_2024, sales_2025, stock_df):
     sales["Month_Index"] = (sales["Year"] - sales["Year"].min()) * 12 + sales["Month_Num"]
     sales["Month_sin"] = np.sin(2 * np.pi * sales["Month_Num"] / 12)
     sales["Month_cos"] = np.cos(2 * np.pi * sales["Month_Num"] / 12)
-    monthly_sales = sales.groupby(["Item Code", "Item Description", "Date", "Month_Index", "Month_Num", "Year", "Month_sin", "Month_cos"]).agg(Quantity=("Quantity", "sum")).reset_index()
+    monthly_sales = sales.groupby(["CAI", "Item Description", "Date", "Month_Index", "Month_Num", "Year", "Month_sin", "Month_cos"]).agg(Quantity=("Quantity", "sum")).reset_index()
+    stock_cai_series = stock_df["CAI_CODE"] if "CAI_CODE" in stock_df else stock_df.get("CAI")
+    stock_df["CAI"] = normalize_cai(stock_cai_series)
     stock_df["QTY"] = pd.to_numeric(stock_df["QTY"], errors="coerce")
-    stock_summary = stock_df.groupby(["ITEM_CODE", "Item Description"]).agg(Stock_QTY=("QTY", "sum")).reset_index()
+    stock_df = stock_df.dropna(subset=["CAI", "QTY"])
+    stock_summary = stock_df.groupby(["CAI", "Item Description"]).agg(Stock_QTY=("QTY", "sum")).reset_index()
     return sales, monthly_sales, stock_summary
 
 @st.cache_data
 def generate_forecasts(monthly_sales):
-    top_items = monthly_sales.groupby("Item Code")["Quantity"].sum().sort_values(ascending=False).head(10).index.tolist()
+    ranking = monthly_sales.groupby("CAI")["Quantity"].sum().sort_values(ascending=False)
     forecast_all = []
-    for item in top_items:
-        df = monthly_sales[monthly_sales["Item Code"] == item].copy().sort_values("Date")
+    top_items = []
+    for item in ranking.index:
+        df = monthly_sales[monthly_sales["CAI"] == item].copy().sort_values("Date")
         df["RollingMean_3"] = df["Quantity"].rolling(window=3, min_periods=1).mean()
         features = ["Month_Index", "Month_Num", "Year", "Month_sin", "Month_cos", "RollingMean_3"]
         df = df.dropna(subset=features)
+        if df.empty:
+            continue
         model = xgb.XGBRegressor(n_estimators=20, max_depth=2, random_state=42, n_jobs=-1)
         model.fit(df[features], df["Quantity"])
         last_date, last_index = df["Date"].max(), df["Month_Index"].max()
@@ -66,13 +84,16 @@ def generate_forecasts(monthly_sales):
             pred = model.predict(X)[0]
             rolling_window.append(pred)
             forecast_all.append({
-                "Item Code": item,
+                "CAI": item,
                 "Item Description": df["Item Description"].iloc[0],
                 "Date": future_date,
                 "Predicted Quantity": np.round(pred),
                 "IC_lower": max(0, np.round(pred * 0.85)),
                 "IC_upper": np.round(pred * 1.15)
             })
+        top_items.append(item)
+        if len(top_items) >= 10:
+            break
     forecast_df = pd.DataFrame(forecast_all)
     return forecast_df, top_items
 
@@ -80,21 +101,33 @@ sales_2024, sales_2025, stock_df = load_data()
 sales, monthly_sales, stock_summary = prepare_data(sales_2024, sales_2025, stock_df)
 forecast_df, top_items = generate_forecasts(monthly_sales)
 
-selected_item = st.selectbox("📦 Sélectionner un produit du TOP 10 :", top_items)
-hist_data = monthly_sales[monthly_sales["Item Code"] == selected_item].copy()
-forecast_data = forecast_df[forecast_df["Item Code"] == selected_item].copy()
+item_labels = monthly_sales.groupby("CAI")["Item Description"].first().to_dict()
+
+if not top_items:
+    st.warning("Aucune prévision disponible pour les CAI.")
+    st.stop()
+
+selected_item = st.selectbox(
+    "📦 Sélectionner un CAI du TOP 10 :",
+    top_items,
+    format_func=lambda cai: f"{cai} – {item_labels.get(cai, '')}".rstrip(" – ")
+)
+hist_data = monthly_sales[monthly_sales["CAI"] == selected_item].copy()
+forecast_data = forecast_df[forecast_df["CAI"] == selected_item].copy()
+item_description = item_labels.get(selected_item, "")
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=hist_data["Date"], y=hist_data["Quantity"], mode='lines+markers', name='Historique', line=dict(color='gold')))
 fig.add_trace(go.Scatter(x=forecast_data["Date"], y=forecast_data["Predicted Quantity"], mode='lines+markers', name='Prévision IA', line=dict(color='lime')))
 fig.add_trace(go.Scatter(x=forecast_data["Date"], y=forecast_data["IC_upper"], name="IC upper", line=dict(width=0), showlegend=False))
 fig.add_trace(go.Scatter(x=forecast_data["Date"], y=forecast_data["IC_lower"], name="IC lower", fill='tonexty', fillcolor='rgba(0,255,0,0.2)', line=dict(width=0), showlegend=False))
-fig.update_layout(title=f"Prévision de ventes – {selected_item}", xaxis_title='Mois', yaxis_title='Quantité', template="plotly_dark")
+title_suffix = f" – {item_description}" if item_description else ""
+fig.update_layout(title=f"Prévision de ventes – CAI {selected_item}{title_suffix}", xaxis_title='Mois', yaxis_title='Quantité', template="plotly_dark")
 
 st.plotly_chart(fig, use_container_width=True)
 
 st.subheader("📋 Détail du mois de juillet")
-july_stock = stock_summary[stock_summary["ITEM_CODE"] == selected_item]["Stock_QTY"].values
+july_stock = stock_summary[stock_summary["CAI"] == selected_item]["Stock_QTY"].values
 july_stock = july_stock[0] if len(july_stock) > 0 else 0
 forecast_item = forecast_data.copy()
 forecast_item["Cumul prévisions"] = forecast_item["Predicted Quantity"].cumsum()
